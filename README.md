@@ -1,2 +1,2 @@
 # NICO-2022DataReading
-Implement the dataloader
+Implement the dataloader and training template
