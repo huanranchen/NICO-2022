@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from dataUtils import *
+from .dataUtils import *
 import random
 from PIL import Image
 from torchvision import transforms
