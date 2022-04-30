@@ -7,6 +7,7 @@ import math
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from data.data import get_loader
+from torch.cuda.amp import autocast, GradScaler
 
 
 class Model(nn.Module):
@@ -48,7 +49,11 @@ def train(train_loader,
           lr=4e-3,
           weight_decay=0.05,
           total_epoch=100,
-          label_smoothing=0):
+          label_smoothing=0,
+          fp16_training = True,
+          ):
+
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = Model().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -56,6 +61,9 @@ def train(train_loader,
                                                 num_warmup_steps=20,
                                                 num_training_steps=total_epoch)
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
+
+    scalar = GradScaler()
+
     for epoch in range(1, total_epoch + 1):
         # train
         model.train()
@@ -63,17 +71,20 @@ def train(train_loader,
         train_acc = 0
         best_acc = 0
         for x, y in tqdm(train_loader):
-            x = x.to(device)
-            y = y.to(device)
+            with autocast():
+                x = x.to(device)
+                y = y.to(device)
 
-            x = model(x)  # N, 60
-            _, pre = torch.max(x, dim=1)
-            train_acc += torch.sum(pre == y).item()
-            loss = criterion(x, y)
+                x = model(x)  # N, 60
+                _, pre = torch.max(x, dim=1)
+                train_acc += torch.sum(pre == y).item()
+                loss = criterion(x, y)
+
             train_loss += loss.item()
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scalar.scale(loss).backward()
+            scalar.step(optimizer)
+            scalar.update()
 
         train_loss /= len(train_loader)
         train_acc /= len(train_loader)
@@ -86,12 +97,13 @@ def train(train_loader,
             valid_loss = 0
             valid_acc = 0
             for x, y in tqdm(valid_loader):
-                x = x.to(device)
-                y = y.to(device)
-                x = model(x)  # N, 60
-                _, pre = torch.max(x, dim=1)
-                valid_acc += torch.sum(pre == y).item()
-                loss = criterion(x, y)
+                with autocast():
+                    x = x.to(device)
+                    y = y.to(device)
+                    x = model(x)  # N, 60
+                    _, pre = torch.max(x, dim=1)
+                    valid_acc += torch.sum(pre == y).item()
+                    loss = criterion(x, y)
                 valid_loss += loss.item()
 
             valid_loss /= len(valid_loader)

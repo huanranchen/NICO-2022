@@ -30,7 +30,7 @@ class MyDataSet(Dataset):
 
         self.transform = transforms.Compose([
             # add transforms here
-            transforms.Resize((448,448)),
+            transforms.Resize((224,224)),
             transforms.RandomHorizontalFlip(0.5),
             # transforms.RandomRotation(degrees=180),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.4),
@@ -96,6 +96,9 @@ def get_loader(train_image_path, valid_image_path, label2id_path, batch_size = 3
     context_category_list = ['autumn','dim','grass','outdoor','rock','water']
     valid_category = context_category_list[random.randint(0,len(context_category_list) - 1)]
 
+    print(f'we choose {valid_category} as valid, others as train')
+    print('-' * 100)
+
     train_set = MyDataSet(mode = 'train', train_image_path=train_image_path,
                           label2id_path=label2id_path, valid_category=valid_category)
 
@@ -105,6 +108,9 @@ def get_loader(train_image_path, valid_image_path, label2id_path, batch_size = 3
                           train_image_path = valid_image_path, label2id_path=label2id_path)
 
     valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=True)
+    
+    print('managed to get loader!!!!!')
+    print('-' * 100)
 
     return train_loader, valid_loader
 
