@@ -48,9 +48,11 @@ def train(train_loader,
           valid_loader,
           lr=4e-3,
           weight_decay=0.05,
-          total_epoch=100,
+          total_epoch=10,
           label_smoothing=0,
           fp16_training = True,
+          warmup_epoch = 1,
+          warmup_cycle = 100000,
           ):
 
 
@@ -58,11 +60,13 @@ def train(train_loader,
     model = Model().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = get_cosine_schedule_with_warmup(optimizer,
-                                                num_warmup_steps=20,
-                                                num_training_steps=total_epoch)
+                                                num_warmup_steps=len(train_loader)*warmup_epoch,
+                                                num_training_steps=total_epoch*len(train_loader),
+                                                num_cycles=warmup_cycle)
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
 
     scalar = GradScaler()
+    step = 0
 
     for epoch in range(1, total_epoch + 1):
         # train
@@ -84,6 +88,7 @@ def train(train_loader,
             optimizer.zero_grad()
             scalar.scale(loss).backward()
             scalar.step(optimizer)
+            scheduler.step()
             scalar.update()
 
         train_loss /= len(train_loader)
@@ -115,7 +120,7 @@ def train(train_loader,
                 best_acc = valid_acc
                 torch.save(model.state_dict(), 'model.pth')
 
-        scheduler.step()
+
 
 
 if __name__ == '__main__':
