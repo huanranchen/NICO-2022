@@ -9,11 +9,11 @@ from torchvision import transforms
 
 class MyDataSet(Dataset):
     def __init__(self,
-                 mode = 'train',
-                 valid_category = None,
-                 label2id_path = 'dg_label_id_mapping.json',
-                 test_image_path = None,
-                 train_image_path = './public_dg_0416/train/',
+                 mode='train',
+                 valid_category=None,
+                 label2id_path='./data/dg_label_id_mapping.json',
+                 test_image_path=None,
+                 train_image_path='./public_dg_0416/train/',
                  ):
         '''
         :param mode:  train? valid? test?
@@ -30,11 +30,16 @@ class MyDataSet(Dataset):
 
         self.transform = transforms.Compose([
             # add transforms here
-            transforms.Resize((224,224)),
+            transforms.Resize((224, 224)),
             transforms.RandomHorizontalFlip(0.5),
             # transforms.RandomRotation(degrees=180),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.4),
             transforms.RandomGrayscale(p=0.1),
+            transforms.ToTensor(),
+        ])
+
+        self.test_transform = transforms.Compose([
+            transforms.Resize((224, 224)),
             transforms.ToTensor(),
         ])
 
@@ -49,16 +54,16 @@ class MyDataSet(Dataset):
             del self.total_dic[valid_category]
             self.synthesize_images()
 
-
         if mode == 'valid':
             self.total_dic = get_train_set_dic(train_image_path)
             self.total_dic = dict([(valid_category, self.total_dic[valid_category])])
             self.synthesize_images()
 
-
-
     def synthesize_images(self):
         self.images = {}
+
+        count = 0
+
         for context_category, context_value in list(self.total_dic.items()):
             for category_name, image_list in list(context_value.items()):
                 for img in image_list:
@@ -68,7 +73,9 @@ class MyDataSet(Dataset):
                     now_dic['context_category'] = context_category
                     self.images[len(self.images)] = now_dic
 
-
+                    # count +=1
+                    # if count >= 10:
+                    #     return 0
 
     def __len__(self):
         return len(self.images)
@@ -76,8 +83,8 @@ class MyDataSet(Dataset):
     def __getitem__(self, item):
         if self.mode == 'test':
             img = Image.open(self.test_image_path + self.images[item])
-            img = self.transform(img)
-            return img
+            img = self.test_transform(img)
+            return img, self.images[item]
 
         if self.mode == 'train' or self.mode == 'valid':
             img_dic = self.images[item]
@@ -87,58 +94,54 @@ class MyDataSet(Dataset):
 
             return img, y
 
+    def get_id2label(self):
+        return self.id2label
 
-def get_loader(train_image_path, valid_image_path, label2id_path, batch_size = 32, ):
+
+def get_loader(train_image_path, valid_image_path, label2id_path, batch_size=32, valid_category = 'autumn'):
     '''
     if you are familiar with me, you will know this function aims to get train loader and valid loader
     :return:
     '''
-    context_category_list = ['autumn','dim','grass','outdoor','rock','water']
-    valid_category = context_category_list[random.randint(0,len(context_category_list) - 1)]
+    context_category_list = ['autumn', 'dim', 'grass', 'outdoor', 'rock', 'water']
+    if valid_category is None:
+        valid_category = context_category_list[random.randint(0, len(context_category_list) - 1)]
 
     print(f'we choose {valid_category} as valid, others as train')
     print('-' * 100)
 
-    train_set = MyDataSet(mode = 'train', train_image_path=train_image_path,
+    train_set = MyDataSet(mode='train', train_image_path=train_image_path,
                           label2id_path=label2id_path, valid_category=valid_category)
 
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-    valid_set = MyDataSet(mode = 'valid', valid_category=valid_category,
-                          train_image_path = valid_image_path, label2id_path=label2id_path)
+    valid_set = MyDataSet(mode='valid', valid_category=valid_category,
+                          train_image_path=valid_image_path, label2id_path=label2id_path)
 
     valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=True)
-    
+
     print('managed to get loader!!!!!')
     print('-' * 100)
 
     return train_loader, valid_loader
 
 
-def get_test_loader():
+def get_test_loader(batch_size=32, test_image_path='./data/public_dg_0416/public_test_flat/'):
     '''
-    I will implement that tomorrow
+    No discriptions
     :return:
     '''
-    pass
+    test_set = MyDataSet(mode='test', test_image_path=test_image_path)
+    loader = DataLoader(test_set, batch_size=batch_size, shuffle=True)
+    return loader, test_set.get_id2label()
 
 
 if __name__ == '__main__':
-    train_loader, valid_loader = get_loader(train_image_path='./public_dg_0416/train/', valid_image_path='./public_dg_0416/train/',
-               label2id_path='dg_label_id_mapping.json')
+    train_loader, valid_loader = get_loader(train_image_path='./public_dg_0416/train/',
+                                            valid_image_path='./public_dg_0416/train/',
+                                            label2id_path='dg_label_id_mapping.json')
 
-    for x,y in valid_loader:
+    for x, y in valid_loader:
         print(x)
         print(y)
         assert False
-
-
-
-
-
-
-
-
-
-
-

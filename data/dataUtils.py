@@ -41,11 +41,18 @@ def get_test_set_images(path):
     # implement a function, return a list of image names
 
     dir = os.listdir(path)
-    print(dir)
+    # print(dir)
+    return dir
+
+def write_result(result, path = 'prediction.json'):
+
+    with open(path, 'w') as f:
+        json.dump(result, f)
+
+    print('managed to save result!')
+    print('-'*100)
 
 
 if __name__ == '__main__':
-    # get_test_set_images(path = './public_dg_0416/public_test_flat')
-    total_dic = get_train_set_dic('./public_dg_0416/train/')
-    dic_grass = total_dic['autumn']
-    print(dic_grass['airplane'])
+    a = {'hello':1, 'bye':2}
+    write_result(a)

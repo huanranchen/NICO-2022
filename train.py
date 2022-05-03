@@ -46,8 +46,8 @@ def get_cosine_schedule_with_warmup(
 
 def train(train_loader,
           valid_loader,
-          lr=4e-3,
-          weight_decay=0.05,
+          lr=5e-3,
+          weight_decay=1e-5,
           total_epoch=10,
           label_smoothing=0,
           fp16_training = True,
@@ -59,21 +59,21 @@ def train(train_loader,
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = Model().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = get_cosine_schedule_with_warmup(optimizer,
-                                                num_warmup_steps=len(train_loader)*warmup_epoch,
-                                                num_training_steps=total_epoch*len(train_loader),
-                                                num_cycles=warmup_cycle)
+    # scheduler = get_cosine_schedule_with_warmup(optimizer,
+    #                                             num_warmup_steps=len(train_loader)*warmup_epoch,
+    #                                             num_training_steps=total_epoch*len(train_loader),
+    #                                             num_cycles=warmup_cycle)
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
 
     scalar = GradScaler()
     step = 0
-
+    best_acc = 0
     for epoch in range(1, total_epoch + 1):
         # train
         model.train()
         train_loss = 0
         train_acc = 0
-        best_acc = 0
+
         for x, y in tqdm(train_loader):
             with autocast():
                 x = x.to(device)
@@ -81,14 +81,14 @@ def train(train_loader,
 
                 x = model(x)  # N, 60
                 _, pre = torch.max(x, dim=1)
-                train_acc += torch.sum(pre == y).item()
+                train_acc += (torch.sum(pre == y).item())/y.shape[0]
                 loss = criterion(x, y)
 
             train_loss += loss.item()
             optimizer.zero_grad()
             scalar.scale(loss).backward()
             scalar.step(optimizer)
-            scheduler.step()
+            # scheduler.step()
             scalar.update()
 
         train_loss /= len(train_loader)
@@ -107,7 +107,7 @@ def train(train_loader,
                     y = y.to(device)
                     x = model(x)  # N, 60
                     _, pre = torch.max(x, dim=1)
-                    valid_acc += torch.sum(pre == y).item()
+                    valid_acc += (torch.sum(pre == y).item())/y.shape[0]
                     loss = criterion(x, y)
                 valid_loss += loss.item()
 
@@ -124,7 +124,7 @@ def train(train_loader,
 
 
 if __name__ == '__main__':
-    train_loader, valid_loader = get_loader(batch_size=1,
+    train_loader, valid_loader = get_loader(batch_size=10,
                                             train_image_path='./data/public_dg_0416/train/',
                                             valid_image_path='./data/public_dg_0416/train/',
                                             label2id_path='./data/dg_label_id_mapping.json')
