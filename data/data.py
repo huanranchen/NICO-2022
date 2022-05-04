@@ -32,7 +32,6 @@ class MyDataSet(Dataset):
             # add transforms here
             transforms.Resize((224, 224)),
             transforms.RandomHorizontalFlip(0.5),
-            # transforms.RandomRotation(degrees=180),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.4),
             transforms.RandomGrayscale(p=0.1),
             transforms.ToTensor(),
@@ -92,6 +91,8 @@ class MyDataSet(Dataset):
             img = self.transform(img)
             y = img_dic['category_id']
 
+            # print(img_dic['path'], self.id2label[y])
+
             return img, y
 
     def get_id2label(self):
@@ -122,16 +123,17 @@ def get_loader(train_image_path, valid_image_path, label2id_path, batch_size=32,
 
     print('managed to get loader!!!!!')
     print('-' * 100)
+    print('3'*100)
 
     return train_loader, valid_loader
 
 
-def get_test_loader(batch_size=32, test_image_path='./data/public_dg_0416/public_test_flat/'):
+def get_test_loader(batch_size=32, test_image_path='./data/public_dg_0416/public_test_flat/',label2id_path='./data/dg_label_id_mapping.json'):
     '''
     No discriptions
     :return:
     '''
-    test_set = MyDataSet(mode='test', test_image_path=test_image_path)
+    test_set = MyDataSet(mode='test', test_image_path=test_image_path,label2id_path=label2id_path)
     loader = DataLoader(test_set, batch_size=batch_size, shuffle=True)
     return loader, test_set.get_id2label()
 

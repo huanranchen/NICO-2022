@@ -32,5 +32,5 @@ if __name__ == '__main__':
     #                                         train_image_path='./data/public_dg_0416/train/',
     #                                         valid_image_path='./data/public_dg_0416/train/',
     #                                         label2id_path='./data/dg_label_id_mapping.json')
-    test(loader, id2label)
+    test(loader, id2label,model_path='resnet18.pth')
 

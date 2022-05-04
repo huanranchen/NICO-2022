@@ -10,21 +10,42 @@ from data.data import get_loader
 from torch.cuda.amp import autocast, GradScaler
 
 
+
 class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
-        self.model = models.convnext_tiny()
+        self.model = models.convnext_tiny(pretrained=False)
 
         self.classifier = nn.Sequential(
-            nn.LayerNorm([768, 1, 1], eps=1e-6, elementwise_affine=True),
             nn.Flatten(start_dim=1, end_dim=-1),
+            # nn.LayerNorm([768], eps=1e-6, elementwise_affine=True),
             nn.Linear(768, 60)
         )
 
+        self.apply(self._init_weights)
+
     def forward(self, x):
-        x = self.model.features(x)
+        # x = self.model.conv1(x)
+        # x=self.model.bn1(x)
+        # x=self.model.relu(x)
+        # x=self.model.maxpool(x)
+        # x=self.model.layer1(x)
+        # x=self.model.layer2(x)
+        # x=self.model.layer3(x)
+        # x=self.model.layer4(x)
+
+        x=self.model.features(x)
         x = self.model.avgpool(x)
-        return self.classifier(x)
+
+        x = self.classifier(x)
+        #x = self.model(x)
+
+        return x
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            nn.init.trunc_normal_(m.weight, std=.2)
+            nn.init.constant_(m.bias, 0)
 
 
 def get_cosine_schedule_with_warmup(
@@ -46,13 +67,13 @@ def get_cosine_schedule_with_warmup(
 
 def train(train_loader,
           valid_loader,
-          lr=5e-3,
+          lr=4e-3,
           weight_decay=1e-5,
-          total_epoch=10,
+          total_epoch=120,
           label_smoothing=0,
           fp16_training = True,
           warmup_epoch = 1,
-          warmup_cycle = 100000,
+          warmup_cycle = 12000,
           ):
 
 
@@ -65,7 +86,7 @@ def train(train_loader,
     #                                             num_cycles=warmup_cycle)
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
 
-    scalar = GradScaler()
+
     step = 0
     best_acc = 0
     for epoch in range(1, total_epoch + 1):
@@ -75,21 +96,28 @@ def train(train_loader,
         train_acc = 0
 
         for x, y in tqdm(train_loader):
-            with autocast():
-                x = x.to(device)
-                y = y.to(device)
 
-                x = model(x)  # N, 60
-                _, pre = torch.max(x, dim=1)
-                train_acc += (torch.sum(pre == y).item())/y.shape[0]
-                loss = criterion(x, y)
+            x = x.to(device)
+            y = y.to(device)
 
+            x = model(x)  # N, 60
+            _, pre = torch.max(x, dim=1)
+            train_acc += (torch.sum(pre == y).item())/y.shape[0]
+            loss = criterion(x, y)
             train_loss += loss.item()
             optimizer.zero_grad()
-            scalar.scale(loss).backward()
-            scalar.step(optimizer)
+            loss.backward()
+
+            # if step == 2:
+            #     for name, w in model.named_parameters():
+            #         print(name, torch.sum(w.data ** 2), torch.sum(w.grad ** 2))
+
+            nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            optimizer.step()
+            #step += 1
             # scheduler.step()
-            scalar.update()
+
+
 
         train_loss /= len(train_loader)
         train_acc /= len(train_loader)
@@ -102,13 +130,12 @@ def train(train_loader,
             valid_loss = 0
             valid_acc = 0
             for x, y in tqdm(valid_loader):
-                with autocast():
-                    x = x.to(device)
-                    y = y.to(device)
-                    x = model(x)  # N, 60
-                    _, pre = torch.max(x, dim=1)
-                    valid_acc += (torch.sum(pre == y).item())/y.shape[0]
-                    loss = criterion(x, y)
+                x = x.to(device)
+                y = y.to(device)
+                x = model(x)  # N, 60
+                _, pre = torch.max(x, dim=1)
+                valid_acc += (torch.sum(pre == y).item())/y.shape[0]
+                loss = criterion(x, y)
                 valid_loss += loss.item()
 
             valid_loss /= len(valid_loader)
