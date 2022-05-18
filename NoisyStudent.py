@@ -82,7 +82,7 @@ class Model(nn.Module):
 
     def load_model(self):
         start_state = torch.load('model.pth', map_location=self.device)
-        self.model.load_state_dict(start_state)
+        self.model.load_state_dict(start_state['model_state'])
         # self.load_state_dict(start_state)
         print('using loaded model')
         print('-' * 100)
@@ -113,7 +113,7 @@ def get_cosine_schedule_with_warmup(
 class NoisyStudent():
     def __init__(self,
                  batch_size=64,
-                 lr=1e-5,
+                 lr=1e-4,
                  weight_decay=0,
                  train_image_path='./public_dg_0416/train/',
                  valid_image_path='./public_dg_0416/train/',
@@ -135,7 +135,8 @@ class NoisyStudent():
                                                                   transforms='train',
                                                                   label2id_path=label2id_path,
                                                                   test_image_path=test_image_path)
-        self.train_loader = MixLoader([self.train_loader, self.test_loader_student])
+        self.train_loader = MixLoader([self.train_loader, self.test_loader_student],
+                                      probs=[0.5, 0.5])
         del self.test_loader_student
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = Model().to(self.device)
@@ -178,7 +179,7 @@ class NoisyStudent():
         for name in list(names):
             y.append(self.result[name])
 
-        return torch.tensor(y, device = self.device)
+        return torch.cat(y, dim=0).to(self.device)
 
     def train(self,
               total_epoch=3,
@@ -196,7 +197,7 @@ class NoisyStudent():
             # first, predict
             self.model.eval()
             self.predict()
-            self.result = self.save_result(epoch)
+            self.save_result(epoch)
 
             self.model.train()
             train_loss = 0

@@ -15,7 +15,7 @@ class MyDataSet(Dataset):
                  label2id_path='./data/dg_label_id_mapping.json',
                  test_image_path=None,
                  train_image_path='./public_dg_0416/train/',
-                 transform_type = None,
+                 transform_type=None,
                  ):
         '''
         :param mode:  train? valid? test?
@@ -33,17 +33,20 @@ class MyDataSet(Dataset):
 
         self.transform = transforms.Compose([
             # add transforms here
-            transforms.Resize((224, 224)),
-            transforms.RandomHorizontalFlip(0.5),
-            transforms.RandomRotation(15),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
-            transforms.RandomGrayscale(p=0.1),
+            transforms.Resize(224),
+            transforms.RandomResizedCrop(224),
+            transforms.RandAugment(5, 9),
+            # transforms.RandomHorizontalFlip(0.5),
+            # transforms.RandomRotation(15),
+            # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
+            # transforms.RandomGrayscale(p=0.1),
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
 
         self.test_transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize(224),
+            transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
@@ -92,7 +95,7 @@ class MyDataSet(Dataset):
     def __getitem__(self, item):
         if self.mode == 'test':
             img = Image.open(self.test_image_path + self.images[item])
-            if self.transform_type == 'test' or None:
+            if self.transform_type == 'test' or self.transform_type is None:
                 img = self.test_transform(img)
             else:
                 img = self.transform(img)
@@ -145,7 +148,7 @@ def get_loader(train_image_path, valid_image_path, label2id_path, batch_size=32,
 
 def get_test_loader(batch_size=32,
                     test_image_path='./public_dg_0416/public_test_flat/',
-                    label2id_path='./dg_label_id_mapping.json', transforms = None):
+                    label2id_path='./dg_label_id_mapping.json', transforms=None):
     '''
     No discriptions
     :return:

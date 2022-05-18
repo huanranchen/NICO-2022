@@ -10,6 +10,7 @@ def get_label2id(file_name):
     # implement a function, which return a dic, mapping from label(str) to id(integer)
     # for example:
     # dic['cat']=1
+
     with open(file_name) as file:
         dict = json.load(file)
 
