@@ -35,20 +35,20 @@ class MyDataSet(Dataset):
             # add transforms here
             transforms.Resize(224),
             transforms.RandomResizedCrop(224),
-            transforms.RandAugment(5, 9),
+            transforms.RandAugment(3, 5),
             # transforms.RandomHorizontalFlip(0.5),
             # transforms.RandomRotation(15),
             # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
             # transforms.RandomGrayscale(p=0.1),
             transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
 
         self.test_transform = transforms.Compose([
             transforms.Resize(224),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
         ])
 
         # if train or valid, synthesize a dic contain num_images * dic, each subdic contain:
@@ -115,7 +115,12 @@ class MyDataSet(Dataset):
         return self.id2label
 
 
-def get_loader(train_image_path, valid_image_path, label2id_path, batch_size=32, valid_category='autumn'):
+def get_loader(train_image_path,
+               valid_image_path,
+               label2id_path,
+               batch_size=32,
+               valid_category='autumn',
+               num_workers=4):
     '''
     if you are familiar with me, you will know this function aims to get train loader and valid loader
     :return:
@@ -130,7 +135,7 @@ def get_loader(train_image_path, valid_image_path, label2id_path, batch_size=32,
     train_set = MyDataSet(mode='train', train_image_path=train_image_path,
                           label2id_path=label2id_path, valid_category=valid_category)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
     if valid_category is None:
         return train_loader

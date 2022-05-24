@@ -10,6 +10,13 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 import torch.nn.functional as F
 from PIL import Image
+from ASRNorm import ASRNorm
+
+
+def hook(module, grad_in, grad_out):
+    print('-' * 100)
+    print(module)
+    print(f'grad in {grad_in}, grad out {grad_out}')
 
 
 class MixLoader():
@@ -56,22 +63,13 @@ class MixLoader():
         return self.max_time
 
 
-def smoothing_cross_entropy(x, y, ):
-    '''
-    -y log pre
-    :param x: N, D
-    :param y: N, D
-    :return:
-    '''
-    if x.shape != y.shape:
-        return F.cross_entropy(x, y)
-    return F.kl_div(F.log_softmax(x, dim=1), y, reduction='batchmean')
-
 
 class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
-        self.model = models.resnet50(num_classes=60, )
+
+        self.model = models.resnet50(num_classes=60, norm_layer = ASRNorm)
+
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # self.apply(self._init_weights)
         print('mix' * 100)
@@ -81,11 +79,19 @@ class Model(nn.Module):
         return x
 
     def load_model(self):
-        start_state = torch.load('model.pth', map_location=self.device)
-        self.model.load_state_dict(start_state)
-        # self.load_state_dict(start_state)
-        print('using loaded model')
-        print('-' * 100)
+        if os.path.exists('model.pth'):
+            start_state = torch.load('model.pth', map_location=self.device)
+            #self.model.load_state_dict(start_state)
+
+            dic = self.model.state_dict()
+            keys = list(start_state.keys())
+            for name, param in self.model.named_parameters():
+                if name in keys:
+                    dic[name] = start_state[name]
+
+            self.model.load_state_dict(dic)
+            print('using loaded model')
+            print('-' * 100)
 
     def save_model(self):
         # result = self.model.state_dict()
@@ -113,7 +119,7 @@ def get_cosine_schedule_with_warmup(
 class NoisyStudent():
     def __init__(self,
                  batch_size=64,
-                 lr=1e-5,
+                 lr=1e-4,
                  weight_decay=0,
                  train_image_path='./public_dg_0416/train/',
                  valid_image_path='./public_dg_0416/train/',
@@ -135,7 +141,7 @@ class NoisyStudent():
                                                                   transforms='train',
                                                                   label2id_path=label2id_path,
                                                                   test_image_path=test_image_path)
-        self.train_loader = MixLoader([self.train_loader, self.test_loader_student])
+        # self.train_loader = MixLoader([self.train_loader, self.test_loader_student])
         del self.test_loader_student
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = Model().to(self.device)
@@ -178,7 +184,7 @@ class NoisyStudent():
         for name in list(names):
             y.append(self.result[name])
 
-        return torch.tensor(y, device = self.device)
+        return torch.tensor(y, device=self.device)
 
     def train(self,
               total_epoch=3,
@@ -187,11 +193,7 @@ class NoisyStudent():
               warmup_epoch=1,
               warmup_cycle=12000,
               ):
-        # scheduler = get_cosine_schedule_with_warmup(optimizer,
-        #                                             num_warmup_steps=len(train_loader)*warmup_epoch,
-        #                                             num_training_steps=total_epoch*len(train_loader),
-        #                                             num_cycles=warmup_cycle)
-        criterion = smoothing_cross_entropy
+        criterion = nn.CrossEntropyLoss().to(self.device)
         for epoch in range(1, total_epoch + 1):
             # first, predict
             self.model.eval()
@@ -217,7 +219,7 @@ class NoisyStudent():
                 train_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
-
+                # assert False
                 nn.utils.clip_grad_value_(self.model.parameters(), 0.1)
                 self.optimizer.step()
                 step += 1
@@ -234,8 +236,18 @@ class NoisyStudent():
 
 
 if __name__ == '__main__':
-    x = NoisyStudent(batch_size=1)
-    x.train(total_epoch=10)
+    import argparse
+
+    paser = argparse.ArgumentParser()
+    paser.add_argument('-b', '--batch_size', default=2)
+    paser.add_argument('-t', '--total_epoch', default=10)
+    paser.add_argument('-l', '--lr', default=1e-4)
+    args = paser.parse_args()
+    batch_size = int(args.batch_size)
+    total_epoch = int(args.total_epoch)
+    lr = float(args.lr)
+    x = NoisyStudent(batch_size=batch_size, lr=lr)
+    x.train(total_epoch=total_epoch)
 
     # train_image_path = './public_dg_0416/train/'
     # valid_image_path = './public_dg_0416/train/'
