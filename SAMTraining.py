@@ -66,11 +66,11 @@ class MixLoader():
 class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
-        from PyramidNet import pyramidnet101_a360,get_pyramidnet
+        from PyramidNet import pyramidnet101_a360
         from torchvision import models
         from ASRNorm import ASRNorm
-        self.model = models.densenet121(num_classes=60)
-        # self.model = get_pyramidnet(alpha=48, blocks=152, num_classes=60)
+        self.model = models.DenseNet(block_config=(12,24,51),num_classes=60)
+
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # self.apply(self._init_weights)
         print('densenet' * 100)
@@ -150,7 +150,9 @@ class NoisyStudent():
         if os.path.exists('model.pth'):
             self.model.load_model()
         from pytorch_optimizer import AdaBound
-        self.optimizer = AdaBound(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.optimizer = AdaBound
+        from SAM import SAM
+        self.optimizer = SAM(self.model.parameters(),self.optimizer,adaptive=True)
 
     def save_result(self, epoch=None):
         from data.data import write_result
@@ -196,9 +198,9 @@ class NoisyStudent():
         criterion = nn.CrossEntropyLoss().to(self.device)
         for epoch in range(1, total_epoch + 1):
             # first, predict
-#             self.model.eval()
-#             self.predict()
-#             self.result = self.save_result(epoch)
+            self.model.eval()
+            self.predict()
+            self.result = self.save_result(epoch)
 
             self.model.train()
             train_loss = 0
@@ -207,8 +209,7 @@ class NoisyStudent():
             pbar = tqdm(self.train_loader)
             for x, y in pbar:
                 x = x.to(self.device)
-                if isinstance(y, tuple):
-                    y = self.get_label(y)
+                x_o = x
                 y = y.to(self.device)
                 x = self.model(x)  # N, 60
                 _, pre = torch.max(x, dim=1)
@@ -219,9 +220,15 @@ class NoisyStudent():
                 train_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
-                # assert False
-                nn.utils.clip_grad_value_(self.model.parameters(), 0.1)
-                self.optimizer.step()
+                # nn.utils.clip_grad_value_(self.model.parameters(), 0.1)
+                self.optimizer.first_step()
+                
+                x=self.model(x_o)
+                loss = criterion(x, y)
+                self.optimizer.zero_grad()
+                loss.backward()
+                # nn.utils.clip_grad_value_(self.model.parameters(), 0.1)
+                self.optimizer.second_step()
                 step += 1
                 # scheduler.step()
                 if step % 10 == 0:
@@ -248,5 +255,3 @@ if __name__ == '__main__':
     lr = float(args.lr)
     x = NoisyStudent(batch_size=batch_size, lr=lr)
     x.train(total_epoch=total_epoch)
-
-

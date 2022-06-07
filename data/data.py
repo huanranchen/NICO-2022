@@ -33,22 +33,20 @@ class MyDataSet(Dataset):
 
         self.transform = transforms.Compose([
             # add transforms here
-            transforms.Resize(224),
-            transforms.RandomResizedCrop(224),
-            transforms.RandAugment(3, 5),
-            # transforms.RandomHorizontalFlip(0.5),
+            transforms.RandomResizedCrop((224,224),scale=(0.75,1.0)),
+            transforms.RandomHorizontalFlip(0.5),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
+            transforms.RandAugment(2, 5),
             # transforms.RandomRotation(15),
-            # transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
             # transforms.RandomGrayscale(p=0.1),
             transforms.ToTensor(),
-            # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
 
         self.test_transform = transforms.Compose([
-            transforms.Resize(224),
-            transforms.CenterCrop(224),
+            transforms.Resize((224,224)),
             transforms.ToTensor(),
-            # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
 
         # if train or valid, synthesize a dic contain num_images * dic, each subdic contain:
@@ -120,7 +118,8 @@ def get_loader(train_image_path,
                label2id_path,
                batch_size=32,
                valid_category='autumn',
-               num_workers=4):
+               num_workers=8,
+               pin_memory=False):
     '''
     if you are familiar with me, you will know this function aims to get train loader and valid loader
     :return:
@@ -135,7 +134,8 @@ def get_loader(train_image_path,
     train_set = MyDataSet(mode='train', train_image_path=train_image_path,
                           label2id_path=label2id_path, valid_category=valid_category)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin_memory)
 
     if valid_category is None:
         return train_loader
@@ -153,7 +153,8 @@ def get_loader(train_image_path,
 
 def get_test_loader(batch_size=32,
                     test_image_path='./public_dg_0416/public_test_flat/',
-                    label2id_path='./dg_label_id_mapping.json', transforms=None):
+                    label2id_path='./dg_label_id_mapping.json', transforms=None,
+                    num_workers=8):
     '''
     No discriptions
     :return:
@@ -162,7 +163,7 @@ def get_test_loader(batch_size=32,
                          test_image_path=test_image_path,
                          label2id_path=label2id_path,
                          transform_type=transforms)
-    loader = DataLoader(test_set, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     return loader, test_set.get_id2label()
 
 
