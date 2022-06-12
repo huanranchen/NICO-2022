@@ -1,290 +1,422 @@
+# coding=utf-8
+"""
+(memory efficient) DenseNet.
+
+Reference:
+	https://github.com/pytorch/vision/blob/master/torchvision/models/densenet.py
+	https://github.com/gpleiss/efficient_densenet_pytorch/blob/master/models/densenet.py
+	https://github.com/maciejczyzewski/batchboost/blob/master/models/densenet3.py
+	https://github.com/kakaobrain/fast-autoaugment/blob/master/FastAutoAugment/networks/pyramidnet.py
+
+***Warning***:
+Shake-Drop is not compatible with the memory efficient DenseNet.
+AMP is not compatible with the memory efficient DenseNet.
+This means you should run densenet+shakedrop without amp or efficient implementation.
+"""
+
 import re
 from collections import OrderedDict
-from typing import Any, List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
+
 from torch import Tensor
+from torch.autograd import Variable
+from torch.jit.annotations import List
+
+try:
+	from torch.hub import load_state_dict_from_url
+except ImportError:
+	from torch.utils.model_zoo import load_url as load_state_dict_from_url
 
 
+__all__ = ['DenseNet', 'densenet121', 'densenet169', 'densenet201', 'densenet161',
+			'densenet190']
 
-__all__ = ["DenseNet", "densenet121", "densenet169", "densenet201", "densenet161"]
 
 model_urls = {
-    "densenet121": "https://download.pytorch.org/models/densenet121-a639ec97.pth",
-    "densenet169": "https://download.pytorch.org/models/densenet169-b2777c0a.pth",
-    "densenet201": "https://download.pytorch.org/models/densenet201-c1103571.pth",
-    "densenet161": "https://download.pytorch.org/models/densenet161-8d451a50.pth",
+	'densenet121': 'https://download.pytorch.org/models/densenet121-a639ec97.pth',
+	'densenet169': 'https://download.pytorch.org/models/densenet169-b2777c0a.pth',
+	'densenet201': 'https://download.pytorch.org/models/densenet201-c1103571.pth',
+	'densenet161': 'https://download.pytorch.org/models/densenet161-8d451a50.pth',
 }
 
 
+class ShakeDropFunction(torch.autograd.Function):
+
+	@staticmethod
+	def forward(ctx, x, training=True, p_drop=0.5, alpha_range=[-1, 1]):
+		if training:
+			gate = torch.cuda.FloatTensor([0]).bernoulli_(1 - p_drop)
+			ctx.save_for_backward(gate)
+			if gate.item() == 0:
+				alpha = torch.cuda.FloatTensor(x.size(0)).uniform_(*alpha_range)
+				alpha = alpha.view(alpha.size(0), 1, 1, 1).expand_as(x)
+				return alpha * x
+			else:
+				return x
+		else:
+			return (1 - p_drop) * x
+
+	@staticmethod
+	def backward(ctx, grad_output):
+		gate = ctx.saved_tensors[0]
+		if gate.item() == 0:
+			beta = torch.cuda.FloatTensor(grad_output.size(0)).uniform_(0, 1)
+			beta = beta.view(beta.size(0), 1, 1, 1).expand_as(grad_output)
+			beta = Variable(beta)
+			return beta * grad_output, None, None, None
+		else:
+			return grad_output, None, None, None
+
+
+class ShakeDrop(nn.Module):
+
+	def __init__(self, p_drop=0.5, alpha_range=[-1, 1]):
+		super(ShakeDrop, self).__init__()
+		self.p_drop = p_drop
+		self.alpha_range = alpha_range
+
+	def forward(self, x):
+		return ShakeDropFunction.apply(x, self.training, self.p_drop, self.alpha_range)
+
+
 class _DenseLayer(nn.Module):
-    def __init__(
-        self, num_input_features: int, growth_rate: int, bn_size: int, drop_rate: float, memory_efficient: bool = False
-    ) -> None:
-        super().__init__()
-        self.norm1: nn.BatchNorm2d
-        self.add_module("norm1", nn.BatchNorm2d(num_input_features))
-        self.relu1: nn.ReLU
-        self.add_module("relu1", nn.ReLU(inplace=True))
-        self.conv1: nn.Conv2d
-        self.add_module(
-            "conv1", nn.Conv2d(num_input_features, bn_size * growth_rate, kernel_size=1, stride=1, bias=False)
-        )
-        self.norm2: nn.BatchNorm2d
-        self.add_module("norm2", nn.BatchNorm2d(bn_size * growth_rate))
-        self.relu2: nn.ReLU
-        self.add_module("relu2", nn.ReLU(inplace=True))
-        self.conv2: nn.Conv2d
-        self.add_module(
-            "conv2", nn.Conv2d(bn_size * growth_rate, growth_rate, kernel_size=3, stride=1, padding=1, bias=False)
-        )
-        self.drop_rate = float(drop_rate)
-        self.memory_efficient = memory_efficient
+	def __init__(self, num_input_features, growth_rate, bn_size, drop_rate,
+					p_shakedrop=0.0, memory_efficient=False):
+		super(_DenseLayer, self).__init__()
+		self.add_module('norm1', nn.BatchNorm2d(num_input_features)),
+		self.add_module('relu1', nn.ReLU(inplace=True)),
+		self.add_module('conv1', nn.Conv2d(num_input_features, bn_size *
+											growth_rate, kernel_size=1, stride=1,
+											bias=False)),
+		self.add_module('norm2', nn.BatchNorm2d(bn_size * growth_rate)),
+		self.add_module('relu2', nn.ReLU(inplace=True)),
+		self.add_module('conv2', nn.Conv2d(bn_size * growth_rate, growth_rate,
+											kernel_size=3, stride=1, padding=1,
+											bias=False)),
+		self.drop_rate = float(drop_rate)
+		self.memory_efficient = memory_efficient
+		
+		# shake drop layer
+		self.p_shakedrop = p_shakedrop
+		self.shake_drop = None
+		if self.p_shakedrop > 0:
+			# if you use shake drop, dropout is blocked.
+			self.drop_rate = 0.0
+			self.shake_drop = ShakeDrop(p_shakedrop)
 
-    def bn_function(self, inputs: List[Tensor]) -> Tensor:
-        concated_features = torch.cat(inputs, 1)
-        bottleneck_output = self.conv1(self.relu1(self.norm1(concated_features)))  # noqa: T484
-        return bottleneck_output
+	def bn_function(self, inputs):
+		# type: (List[Tensor]) -> Tensor
+		concated_features = torch.cat(inputs, 1)
+		bottleneck_output = self.conv1(self.relu1(self.norm1(concated_features)))  # noqa: T484
+		return bottleneck_output
 
-    # todo: rewrite when torchscript supports any
-    def any_requires_grad(self, input: List[Tensor]) -> bool:
-        for tensor in input:
-            if tensor.requires_grad:
-                return True
-        return False
+	# todo: rewrite when torchscript supports any
+	def any_requires_grad(self, input):
+		# type: (List[Tensor]) -> bool
+		for tensor in input:
+			if tensor.requires_grad:
+				return True
+		return False
 
-    @torch.jit.unused  # noqa: T484
-    def call_checkpoint_bottleneck(self, input: List[Tensor]) -> Tensor:
-        def closure(*inputs):
-            return self.bn_function(inputs)
+	@torch.jit.unused  # noqa: T484
+	def call_checkpoint_bottleneck(self, input):
+		# type: (List[Tensor]) -> Tensor
+		def closure(*inputs):
+			return self.bn_function(inputs)
 
-        return cp.checkpoint(closure, *input)
+		return cp.checkpoint(closure, *input)
 
-    @torch.jit._overload_method  # noqa: F811
-    def forward(self, input: List[Tensor]) -> Tensor:  # noqa: F811
-        pass
+	@torch.jit._overload_method  # noqa: F811
+	def forward(self, input):
+		# type: (List[Tensor]) -> (Tensor)
+		pass
 
-    @torch.jit._overload_method  # noqa: F811
-    def forward(self, input: Tensor) -> Tensor:  # noqa: F811
-        pass
+	@torch.jit._overload_method  # noqa: F811
+	def forward(self, input):
+		# type: (Tensor) -> (Tensor)
+		pass
 
-    # torchscript does not yet support *args, so we overload method
-    # allowing it to take either a List[Tensor] or single Tensor
-    def forward(self, input: Tensor) -> Tensor:  # noqa: F811
-        if isinstance(input, Tensor):
-            prev_features = [input]
-        else:
-            prev_features = input
+	# torchscript does not yet support *args, so we overload method
+	# allowing it to take either a List[Tensor] or single Tensor
+	def forward(self, input):  # noqa: F811
+		if isinstance(input, Tensor):
+			prev_features = [input]
+		else:
+			prev_features = input
 
-        if self.memory_efficient and self.any_requires_grad(prev_features):
-            if torch.jit.is_scripting():
-                raise Exception("Memory Efficient not supported in JIT")
+		if self.memory_efficient and self.any_requires_grad(prev_features):
+			if torch.jit.is_scripting():
+				raise Exception("Memory Efficient not supported in JIT")
 
-            bottleneck_output = self.call_checkpoint_bottleneck(prev_features)
-        else:
-            bottleneck_output = self.bn_function(prev_features)
+			bottleneck_output = self.call_checkpoint_bottleneck(prev_features)
+		else:
+			bottleneck_output = self.bn_function(prev_features)
 
-        new_features = self.conv2(self.relu2(self.norm2(bottleneck_output)))
-        if self.drop_rate > 0:
-            new_features = F.dropout(new_features, p=self.drop_rate, training=self.training)
-        return new_features
+		new_features = self.conv2(self.relu2(self.norm2(bottleneck_output)))
+
+		if self.drop_rate > 0:
+			new_features = F.dropout(new_features, p=self.drop_rate,
+										training=self.training)
+		
+		if self.p_shakedrop > 0:
+			new_features = self.shake_drop(new_features)
+
+		return new_features
 
 
 class _DenseBlock(nn.ModuleDict):
-    _version = 2
+	_version = 2
 
-    def __init__(
-        self,
-        num_layers: int,
-        num_input_features: int,
-        bn_size: int,
-        growth_rate: int,
-        drop_rate: float,
-        memory_efficient: bool = False,
-    ) -> None:
-        super().__init__()
-        for i in range(num_layers):
-            layer = _DenseLayer(
-                num_input_features + i * growth_rate,
-                growth_rate=growth_rate,
-                bn_size=bn_size,
-                drop_rate=drop_rate,
-                memory_efficient=memory_efficient,
-            )
-            self.add_module("denselayer%d" % (i + 1), layer)
+	def __init__(self, num_layers, num_input_features, bn_size,
+					growth_rate, drop_rate,
+					base_p_shakedrop=0.0,
+					p_shakedrop_slope=0.01, memory_efficient=False):
+		super(_DenseBlock, self).__init__()
+		for i in range(num_layers):
+			layer = _DenseLayer(
+				num_input_features + i * growth_rate,
+				growth_rate=growth_rate,
+				bn_size=bn_size,
+				drop_rate=drop_rate,
+				p_shakedrop=(base_p_shakedrop + p_shakedrop_slope * (i + 1)),
+				memory_efficient=memory_efficient,
+			)
+			self.add_module('denselayer%d' % (i + 1), layer)
 
-    def forward(self, init_features: Tensor) -> Tensor:
-        features = [init_features]
-        for name, layer in self.items():
-            new_features = layer(features)
-            features.append(new_features)
-        return torch.cat(features, 1)
+	def forward(self, init_features):
+		features = [init_features]
+		for name, layer in self.items():
+			new_features = layer(features)
+			features.append(new_features)
+		return torch.cat(features, 1)
 
 
 class _Transition(nn.Sequential):
-    def __init__(self, num_input_features: int, num_output_features: int) -> None:
-        super().__init__()
-        self.add_module("norm", nn.BatchNorm2d(num_input_features))
-        self.add_module("relu", nn.ReLU(inplace=True))
-        self.add_module("conv", nn.Conv2d(num_input_features, num_output_features, kernel_size=1, stride=1, bias=False))
-        self.add_module("pool", nn.AvgPool2d(kernel_size=2, stride=2))
+	def __init__(self, num_input_features, num_output_features):
+		super(_Transition, self).__init__()
+		self.add_module('norm', nn.BatchNorm2d(num_input_features))
+		self.add_module('relu', nn.ReLU(inplace=True))
+		self.add_module('conv', nn.Conv2d(num_input_features, num_output_features,
+											kernel_size=1, stride=1, bias=False))
+		self.add_module('pool', nn.AvgPool2d(kernel_size=2, stride=2))
 
 
 class DenseNet(nn.Module):
-    r"""Densenet-BC model class, based on
-    `"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_.
+	r"""Densenet-BC model class, based on
+	`"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
 
-    Args:
-        growth_rate (int) - how many filters to add each layer (`k` in paper)
-        block_config (list of 4 ints) - how many layers in each pooling block
-        num_init_features (int) - the number of filters to learn in the first convolution layer
-        bn_size (int) - multiplicative factor for number of bottle neck layers
-          (i.e. bn_size * k features in the bottleneck layer)
-        drop_rate (float) - dropout rate after each dense layer
-        num_classes (int) - number of classification classes
-        memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
-          but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_.
-    """
+	Args:
+		growth_rate (int) - how many filters to add each layer (`k` in paper)
+		
+		block_config (list of 3 or 4 ints) - how many layers in each pooling block
+		
+		num_init_features (int) - the number of filters to learn in the first convolution layer
+		
+		bn_size (int) - multiplicative factor for number of bottle neck layers
+			(i.e. bn_size * k features in the bottleneck layer)
+		
+		drop_rate (float) - dropout rate after each dense layer
+		
+		num_classes (int) - number of classification classes
 
-    def __init__(
-        self,
-        growth_rate: int = 32,
-        block_config: Tuple[int, int, int, int] = (6, 12, 24, 16),
-        num_init_features: int = 64,
-        bn_size: int = 4,
-        drop_rate: float = 0,
-        num_classes: int = 1000,
-        memory_efficient: bool = False,
-    ) -> None:
+		memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+			but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
 
-        super().__init__()
-        _log_api_usage_once(self)
+		p_shakedrop (float) - final shape drop probability
+	"""
 
-        # First convolution
-        self.features = nn.Sequential(
-            OrderedDict(
-                [
-                    ("conv0", nn.Conv2d(3, num_init_features, kernel_size=7, stride=2, padding=3, bias=False)),
-                    ("norm0", nn.BatchNorm2d(num_init_features)),
-                    ("relu0", nn.ReLU(inplace=True)),
-                    ("pool0", nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
-                ]
-            )
-        )
+	def __init__(self, growth_rate=32, block_config=(6, 12, 24, 16), num_init_features=None,
+					compression=0.5,
+					bn_size=4, drop_rate=0, num_classes=1000,
+					memory_efficient=False,
+					dataset='imagenet',
+					split_factor=1,
+					final_p_shakedrop=0.5):
 
-        # Each denseblock
-        num_features = num_init_features
-        for i, num_layers in enumerate(block_config):
-            block = _DenseBlock(
-                num_layers=num_layers,
-                num_input_features=num_features,
-                bn_size=bn_size,
-                growth_rate=growth_rate,
-                drop_rate=drop_rate,
-                memory_efficient=memory_efficient,
-            )
-            self.features.add_module("denseblock%d" % (i + 1), block)
-            num_features = num_features + num_layers * growth_rate
-            if i != len(block_config) - 1:
-                trans = _Transition(num_input_features=num_features, num_output_features=num_features // 2)
-                self.features.add_module("transition%d" % (i + 1), trans)
-                num_features = num_features // 2
+		super(DenseNet, self).__init__()
+		assert 0 < compression <= 1, 'compression of densenet should be between 0 and 1'
 
-        # Final batch norm
-        self.features.add_module("norm5", nn.BatchNorm2d(num_features))
+		if split_factor > 1:
+			growth_rate = int(growth_rate / (split_factor ** 0.5) * 2) // 2
+		if num_init_features is None:
+			num_init_features = 2 * growth_rate
 
-        # Linear layer
-        self.classifier = nn.Linear(num_features, num_classes)
+		print("INFO:PyTorch: DenseNet with growth_rate {} "
+				"and inplanes {}".format(growth_rate, num_init_features))
+		
+		self.num_blocks = len(block_config)
+		self.final_p_shakedrop = final_p_shakedrop / (split_factor ** 0.5)
+		self.p_shakedrop_slope = 0.0
+		if self.final_p_shakedrop > 0:
+			self.p_shakedrop_slope = self.final_p_shakedrop / (sum(block_config))
+			print("INFO:PyTorch: DenseNet with final shake drop probability {} "
+				"and slope {}.".format(self.final_p_shakedrop, self.p_shakedrop_slope))
 
-        # Official init from torch repo.
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.constant_(m.bias, 0)
+		# First convolution
+		if dataset == 'imagenet':
+			self.features = nn.Sequential(OrderedDict([
+				('conv0', nn.Conv2d(3, num_init_features, kernel_size=7, stride=2,
+									padding=3, bias=False)),
+				('norm0', nn.BatchNorm2d(num_init_features)),
+				('relu0', nn.ReLU(inplace=True)),
+				('pool0', nn.MaxPool2d(kernel_size=3, stride=2, padding=1)),
+			]))
+		elif dataset in ['cifar10', 'cifar100', 'svhn']:
+			self.features = nn.Sequential(OrderedDict([
+				('conv0', nn.Conv2d(3, num_init_features, kernel_size=3, stride=1,
+									padding=1, bias=False)),
+				('norm0', nn.BatchNorm2d(num_init_features)),
+				('relu0', nn.ReLU(inplace=True)),
+			]))
+			#self.features = nn.Sequential(OrderedDict([
+			#	('conv0', nn.Conv2d(3, num_init_features, kernel_size=3, stride=1, padding=1, bias=False)),
+			#]))
+		else:
+			raise NotImplementedError
 
-    def forward(self, x: Tensor) -> Tensor:
-        features = self.features(x)
-        out = F.relu(features, inplace=True)
-        out = F.adaptive_avg_pool2d(out, (1, 1))
-        out = torch.flatten(out, 1)
-        out = self.classifier(out)
-        return out
+		# Each denseblock
+		num_features = num_init_features
+		for i, num_layers in enumerate(block_config):
+			block = _DenseBlock(
+				num_layers=num_layers,
+				num_input_features=num_features,
+				bn_size=bn_size,
+				growth_rate=growth_rate,
+				drop_rate=drop_rate,
+				base_p_shakedrop=self.final_p_shakedrop * (1.0 * i / self.num_blocks),
+				p_shakedrop_slope=self.p_shakedrop_slope,
+				memory_efficient=memory_efficient
+			)
+			self.features.add_module('denseblock%d' % (i + 1), block)
+			num_features = num_features + num_layers * growth_rate
+			if i != len(block_config) - 1:
+				trans = _Transition(num_input_features=num_features,
+									num_output_features=int(num_features * compression))
+				self.features.add_module('transition%d' % (i + 1), trans)
+				num_features = int(num_features * compression)
 
+		# Final batch norm
+		self.features.add_module('norm_final', nn.BatchNorm2d(num_features))
 
+		# Linear layer
+		self.classifier = nn.Linear(num_features, num_classes)
 
-def _densenet(
-    arch: str,
-    growth_rate: int,
-    block_config: Tuple[int, int, int, int],
-    num_init_features: int,
-    pretrained: bool,
-    progress: bool,
-    **kwargs: Any,
-) -> DenseNet:
-    model = DenseNet(growth_rate, block_config, num_init_features, **kwargs)
-    if pretrained:
-        _load_state_dict(model, model_urls[arch], progress)
-    return model
+		# Official init from torch repo.
+		for m in self.modules():
+			if isinstance(m, nn.Conv2d):
+				nn.init.kaiming_normal_(m.weight)
+			elif isinstance(m, nn.BatchNorm2d):
+				nn.init.constant_(m.weight, 1)
+				nn.init.constant_(m.bias, 0)
+			elif isinstance(m, nn.Linear):
+				nn.init.constant_(m.bias, 0)
 
-
-def densenet121(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> DenseNet:
-    r"""Densenet-121 model from
-    `"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_.
-    The required minimum input size of the model is 29x29.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-        memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
-          but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_.
-    """
-    return _densenet("densenet121", 32, (6, 12, 24, 16), 64, pretrained, progress, **kwargs)
-
-
-def densenet161(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> DenseNet:
-    r"""Densenet-161 model from
-    `"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_.
-    The required minimum input size of the model is 29x29.
-
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-        memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
-          but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_.
-    """
-    return _densenet("densenet161", 48, (6, 12, 36, 24), 96, pretrained, progress, **kwargs)
+	def forward(self, x):
+		features = self.features(x)
+		out = F.relu(features, inplace=True)
+		out = F.adaptive_avg_pool2d(out, (1, 1))
+		out = torch.flatten(out, 1)
+		out = self.classifier(out)
+		return out
 
 
-def densenet169(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> DenseNet:
-    r"""Densenet-169 model from
-    `"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_.
-    The required minimum input size of the model is 29x29.
+def _load_state_dict(model, model_url, progress):
+	# '.'s are no longer allowed in module names, but previous _DenseLayer
+	# has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'.
+	# They are also in the checkpoints in model_urls. This pattern is used
+	# to find such keys.
+	pattern = re.compile(
+		r'^(.*denselayer\d+\.(?:norm|relu|conv))\.((?:[12])\.(?:weight|bias|running_mean|running_var))$')
 
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-        memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
-          but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_.
-    """
-    return _densenet("densenet169", 32, (6, 12, 32, 32), 64, pretrained, progress, **kwargs)
+	state_dict = load_state_dict_from_url(model_url, progress=progress)
+	for key in list(state_dict.keys()):
+		res = pattern.match(key)
+		if res:
+			new_key = res.group(1) + res.group(2)
+			state_dict[new_key] = state_dict[key]
+			del state_dict[key]
+	model.load_state_dict(state_dict)
 
 
-def densenet201(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> DenseNet:
-    r"""Densenet-201 model from
-    `"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_.
-    The required minimum input size of the model is 29x29.
+def _densenet(arch, growth_rate, block_config, num_init_features, pretrained, progress,
+				**kwargs):
+	model = DenseNet(growth_rate, block_config, num_init_features, **kwargs)
+	if pretrained:
+		_load_state_dict(model, model_urls[arch], progress)
+	return model
 
-    Args:
-        pretrained (bool): If True, returns a model pre-trained on ImageNet
-        progress (bool): If True, displays a progress bar of the download to stderr
-        memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
-          but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_.
-    """
-    return _densenet("densenet201", 32, (6, 12, 48, 32), 64, pretrained, progress, **kwargs)
+
+def densenet121(pretrained=False, progress=True, **kwargs):
+	r"""Densenet-121 model from
+	`"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
+
+	Args:
+		pretrained (bool): If True, returns a model pre-trained on ImageNet
+		progress (bool): If True, displays a progress bar of the download to stderr
+		memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+			but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
+	"""
+	return _densenet('densenet121', 32, (6, 12, 24, 16), 64, pretrained, progress,
+						**kwargs)
+
+
+def densenet161(pretrained=False, progress=True, **kwargs):
+	r"""Densenet-161 model from
+	`"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
+
+	Args:
+		pretrained (bool): If True, returns a model pre-trained on ImageNet
+		progress (bool): If True, displays a progress bar of the download to stderr
+		memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+			but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
+	"""
+	return _densenet('densenet161', 48, (6, 12, 36, 24), 96, pretrained, progress,
+						**kwargs)
+
+
+def densenet169(pretrained=False, progress=True, **kwargs):
+	r"""Densenet-169 model from
+	`"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
+
+	Args:
+		pretrained (bool): If True, returns a model pre-trained on ImageNet
+		progress (bool): If True, displays a progress bar of the download to stderr
+		memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+			but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
+	"""
+	return _densenet('densenet169', 32, (6, 12, 32, 32), 64, pretrained, progress,
+						**kwargs)
+
+
+def densenet201(pretrained=False, progress=True, **kwargs):
+	r"""Densenet-201 model from
+	`"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
+
+	Args:
+		pretrained (bool): If True, returns a model pre-trained on ImageNet
+		progress (bool): If True, displays a progress bar of the download to stderr
+		memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+			but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
+	"""
+	return _densenet('densenet201', 32, (6, 12, 48, 32), 64, pretrained, progress,
+						**kwargs)
+
+
+def densenet190(pretrained=False, progress=False, **kwargs):
+	r"""Densenet-190 model from
+	`"Densely Connected Convolutional Networks" <https://arxiv.org/pdf/1608.06993.pdf>`_
+
+	Args:
+		pretrained (bool): If True, returns a model pre-trained on ImageNet
+		progress (bool): If True, displays a progress bar of the download to stderr
+		memory_efficient (bool) - If True, uses checkpointing. Much more memory efficient,
+			but slower. Default: *False*. See `"paper" <https://arxiv.org/pdf/1707.06990.pdf>`_
+	"""
+	block_config = (31, 31, 31)
+	growth_rate = 40
+	return _densenet('densenet190', growth_rate, block_config, None, pretrained, progress,
+						**kwargs)

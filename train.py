@@ -62,14 +62,13 @@ class MixLoader():
         return self.max_time
 
 
-
 class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
-        from PyramidNet import pyramidnet101_a360,get_pyramidnet
+        from PyramidNet import PyramidNet,pyramidnet272
         from torchvision import models
-        from ASRNorm import ASRNorm
-        self.model = models.densenet121(num_classes=60)
+        self.model = pyramidnet272(num_classes=60)
+        # print(self.model)
         # self.model = get_pyramidnet(alpha=48, blocks=152, num_classes=60)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # self.apply(self._init_weights)
@@ -82,15 +81,15 @@ class Model(nn.Module):
     def load_model(self):
         if os.path.exists('model.pth'):
             start_state = torch.load('model.pth', map_location=self.device)
-#             dic = self.model.state_dict()
-#             keys = list(start_state.keys())
-#             for name, param in self.model.named_parameters():
-#                 if name in keys:
-#                     dic[name] = start_state[name]
-#                 else:
-#                     print(f'{name} missed')
+            #             dic = self.model.state_dict()
+            #             keys = list(start_state.keys())
+            #             for name, param in self.model.named_parameters():
+            #                 if name in keys:
+            #                     dic[name] = start_state[name]
+            #                 else:
+            #                     print(f'{name} missed')
 
-#             self.model.load_state_dict(dic)
+            #             self.model.load_state_dict(dic)
             self.model.load_state_dict(start_state)
             print('using loaded model')
             print('-' * 100)
@@ -149,8 +148,9 @@ class NoisyStudent():
 
         if os.path.exists('model.pth'):
             self.model.load_model()
-        from pytorch_optimizer import AdaBound
-        self.optimizer = AdaBound(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+
+        self.lr = lr
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, weight_decay=weight_decay, momentum=0.9)
 
     def save_result(self, epoch=None):
         from data.data import write_result
@@ -193,14 +193,18 @@ class NoisyStudent():
               warmup_epoch=1,
               warmup_cycle=12000,
               ):
+        from torch.cuda.amp import autocast, GradScaler
+        scaler = GradScaler()
+        prev_loss = 999
+        train_loss = 0
         criterion = nn.CrossEntropyLoss().to(self.device)
         for epoch in range(1, total_epoch + 1):
             # first, predict
-#             self.model.eval()
 #             self.predict()
 #             self.result = self.save_result(epoch)
 
             self.model.train()
+            #self.warm_up(epoch, now_loss = train_loss, prev_loss = prev_loss)
             train_loss = 0
             train_acc = 0
             step = 0
@@ -210,18 +214,24 @@ class NoisyStudent():
                 if isinstance(y, tuple):
                     y = self.get_label(y)
                 y = y.to(self.device)
-                x = self.model(x)  # N, 60
-                _, pre = torch.max(x, dim=1)
-                loss = criterion(x, y)
+                
+                with autocast():
+                    x = self.model(x)  # N, 60
+                    _, pre = torch.max(x, dim=1)
+                    loss = criterion(x, y)
+                
                 if pre.shape != y.shape:
                     _, y = torch.max(y, dim=1)
                 train_acc += (torch.sum(pre == y).item()) / y.shape[0]
                 train_loss += loss.item()
                 self.optimizer.zero_grad()
-                loss.backward()
+                scaler.scale(loss).backward()
                 # assert False
                 nn.utils.clip_grad_value_(self.model.parameters(), 0.1)
-                self.optimizer.step()
+                
+                scaler.step(self.optimizer)
+                scaler.update()
+                
                 step += 1
                 # scheduler.step()
                 if step % 10 == 0:
@@ -233,6 +243,20 @@ class NoisyStudent():
             print(f'epoch {epoch}, test loader loss = {train_loss}, acc = {train_acc}')
 
             self.model.save_model()
+            prev_loss = train_loss
+
+    def warm_up(self, epoch, now_loss=None, prev_loss=None):
+        if epoch <= 10:
+            self.optimizer.param_groups[0]['lr'] = self.lr * epoch / 10
+        elif now_loss is not None and prev_loss is not None:
+            delta = prev_loss - now_loss
+            if delta/now_loss < 0.05:
+                self.optimizer.param_groups[0]['lr'] *= 0.9
+        
+        p_lr = self.optimizer.param_groups[0]['lr']
+        print(f'lr = {p_lr}')
+            
+
 
 
 if __name__ == '__main__':
@@ -248,5 +272,3 @@ if __name__ == '__main__':
     lr = float(args.lr)
     x = NoisyStudent(batch_size=batch_size, lr=lr)
     x.train(total_epoch=total_epoch)
-
-
