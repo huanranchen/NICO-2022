@@ -47,14 +47,15 @@ class SelfDistillation():
             print('-' * 100)
 
     @torch.no_grad()
-    def momentum_sychronize(self, m=0.9):
+    def momentum_sychronize(self, m=0.999):
         for s, t in zip(self.student.parameters(), self.teacher.parameters()):
             t.data = m * t.data + (1 - m) * s.data
 
     @staticmethod
-    def chr_loss(s_x, t_x, label, alpha=1, beta=1):
+    def chr_loss(s_x, t_x, label, alpha=1, beta=0.2, t=5):
         return alpha * F.cross_entropy(s_x, label) + \
-               beta * F.kl_div(F.log_softmax(s_x, dim=1), F.softmax(t_x, dim=1), reduction='batchmean')
+               beta * F.kl_div(F.log_softmax(s_x / t, dim=1), F.softmax(t_x / t, dim=1),
+                               reduction='batchmean')
 
     @torch.no_grad()
     def save_result(self, epoch=None):
@@ -113,18 +114,18 @@ class SelfDistillation():
                 x = x.to(self.device)
                 y = y.to(self.device)
 
+                with torch.no_grad():
+                    x_t = self.teacher(x)
                 if fp16:
                     with autocast():
                         x_s = self.student(x)  # N, 60
                         _, pre = torch.max(x_s, dim=1)
-                        with torch.no_grad():
-                            x_t = self.teacher(x)
-
                         loss = criterion(x_s, x_t, y)
-                # else:
-                #     x = self.student(x)  # N, 60
-                #     _, pre = torch.max(x, dim=1)
-                #     loss = criterion(x, y)
+                else:
+                    raise NotImplementedError
+                    x_s = self.student(x)  # N, 60
+                    _, pre = torch.max(x, dim=1)
+                    loss = criterion(x_s, x_t, y)
 
                 if pre.shape != y.shape:
                     _, y = torch.max(y, dim=1)
